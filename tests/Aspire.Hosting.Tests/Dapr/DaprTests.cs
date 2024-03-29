@@ -14,10 +14,7 @@ public class DaprTests
     [Fact]
     public async Task WithDaprSideCarAddsAnnotationAndSidecarResource()
     {
-        using var builder = TestDistributedApplicationBuilder.Create(new DistributedApplicationOptions
-        {
-            DisableDashboard = true
-        });
+        using var builder = TestDistributedApplicationBuilder.Create();
 
         builder.AddDapr(o =>
         {

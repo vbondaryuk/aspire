@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 using System.Diagnostics;
+using System.Reflection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -13,15 +14,40 @@ namespace Aspire.Hosting.Testing;
 /// <typeparam name="TEntryPoint">
 /// A type in the entry point assembly of the target Aspire AppHost. Typically, the Program class can be used.
 /// </typeparam>
-public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDisposable where TEntryPoint : class
+public class DistributedApplicationFactory<TEntryPoint> : DistributedApplicationFactory where TEntryPoint : class
+{
+    /// <summary>
+    /// Initializes a new <see cref="DistributedApplicationFactory{TEntryPoint}"/> instance.
+    /// </summary>
+    public DistributedApplicationFactory() : base(typeof(TEntryPoint).Assembly)
+    { }
+}
+
+/// <summary>
+/// Factory for creating a distributed application for testing.
+/// </summary>
+public class DistributedApplicationFactory : IDisposable, IAsyncDisposable
 {
     private readonly TaskCompletionSource _startedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _exitTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<DistributedApplicationBuilder> _builderTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<DistributedApplication> _appTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _lockObj = new();
+    private readonly Assembly? _entryPointAssembly;
     private bool _entryPointStarted;
     private IHostApplicationLifetime? _hostApplicationLifetime;
+    private IEntryPointInvoker? _entryPointInvoker;
+
+    /// <summary>
+    /// Initializes a new <see cref="DistributedApplicationFactory"/> instance.
+    /// </summary>
+    /// <param name="entryPointAssembly">
+    /// The assembly containing the executable entry point which will be instrumented by this factory.
+    /// </param>
+    public DistributedApplicationFactory(Assembly? entryPointAssembly)
+    {
+        _entryPointAssembly = entryPointAssembly;
+    }
 
     /// <summary>
     /// Gets the distributed application associated with this instance.
@@ -127,8 +153,8 @@ public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDis
     private void OnBuilderCreatingCore(DistributedApplicationOptions applicationOptions, HostApplicationBuilderSettings hostBuilderOptions)
     {
         hostBuilderOptions.EnvironmentName = Environments.Development;
-        hostBuilderOptions.ApplicationName = typeof(TEntryPoint).Assembly.GetName().Name ?? string.Empty;
-        applicationOptions.AssemblyName = typeof(TEntryPoint).Assembly.GetName().Name ?? string.Empty;
+        hostBuilderOptions.ApplicationName = _entryPointAssembly?.GetName().Name ?? string.Empty;
+        applicationOptions.AssemblyName = _entryPointAssembly?.GetName().Name ?? string.Empty;
         applicationOptions.DisableDashboard = true;
         var cfg = hostBuilderOptions.Configuration ??= new();
         cfg.AddInMemoryCollection(new Dictionary<string, string?>
@@ -172,33 +198,33 @@ public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDis
 
                     // This helper launches the target assembly's entry point and hooks into the lifecycle
                     // so we can intercept execution at key stages.
-                    var factory = DistributedApplicationEntryPointInvoker.ResolveEntryPoint(
-                        typeof(TEntryPoint).Assembly,
+                    _entryPointInvoker = DistributedApplicationEntryPointInvoker.ResolveEntryPoint(
+                        _entryPointAssembly,
                         onConstructing: OnBuilderCreatingCore,
                         onConstructed: OnBuilderCreatedCore,
                         onBuilding: OnBuildingCore,
                         entryPointCompleted: OnEntryPointExit);
 
-                    if (factory is null)
+                    if (_entryPointInvoker is null)
                     {
                         throw new InvalidOperationException(
-                            $"Could not intercept application builder instance. Ensure that {typeof(TEntryPoint)} is a type in an executable assembly, that the entrypoint creates an {typeof(DistributedApplicationBuilder)}, and that the resulting {typeof(DistributedApplication)} is being started.");
+                            $"Could not intercept application builder instance. Ensure that {_entryPointAssembly} is an executable assembly, that the entry point creates an {typeof(DistributedApplicationBuilder)}, and that the resulting {typeof(DistributedApplication)} is being started.");
                     }
 
-                    _ = InvokeEntryPoint(factory);
+                    _ = InvokeEntryPoint(_entryPointInvoker);
                     _entryPointStarted = true;
                 }
             }
         }
     }
 
-    private async Task InvokeEntryPoint(Func<string[], CancellationToken, Task<DistributedApplication>> factory)
+    private async Task InvokeEntryPoint(IEntryPointInvoker entryPointInvoker)
     {
         await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             using var cts = new CancellationTokenSource(GetConfiguredTimeout());
-            var app = await factory([], cts.Token).ConfigureAwait(false);
+            var app = await entryPointInvoker.StartAsync([], cts.Token).ConfigureAwait(false);
             _hostApplicationLifetime = app.Services.GetService<IHostApplicationLifetime>()
                 ?? throw new InvalidOperationException($"Application did not register an implementation of {typeof(IHostApplicationLifetime)}.");
             OnBuiltCore(app);
@@ -230,10 +256,16 @@ public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDis
         if (exception is not null)
         {
             _exitTcs.TrySetException(exception);
+            _appTcs.TrySetException(exception);
+            _startedTcs.TrySetException(exception);
+            _builderTcs.TrySetException(exception);
         }
         else
         {
             _exitTcs.TrySetResult();
+            _appTcs.TrySetCanceled();
+            _startedTcs.TrySetCanceled();
+            _builderTcs.TrySetCanceled();
         }
     }
 
@@ -245,14 +277,19 @@ public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDis
         }
     }
 
-    private static void EnsureDepsFile()
+    private void EnsureDepsFile()
     {
-        if (typeof(TEntryPoint).Assembly.EntryPoint == null)
+        if (_entryPointAssembly is null)
         {
-            throw new InvalidOperationException($"Assembly of specified type {typeof(TEntryPoint).Name} does not have an entry point.");
+            return;
         }
 
-        var depsFileName = $"{typeof(TEntryPoint).Assembly.GetName().Name}.deps.json";
+        if (_entryPointAssembly.EntryPoint == null)
+        {
+            throw new InvalidOperationException($"Assembly {_entryPointAssembly} does not have an entry point.");
+        }
+
+        var depsFileName = $"{_entryPointAssembly.GetName().Name}.deps.json";
         var depsFile = new FileInfo(Path.Combine(AppContext.BaseDirectory, depsFileName));
         if (!depsFile.Exists)
         {
@@ -290,16 +327,7 @@ public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDis
             return;
         }
 
-        if (_hostApplicationLifetime is { } hostLifetime)
-        {
-            hostLifetime.StopApplication();
-
-            // Wait for shutdown to complete.
-            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var _ = hostLifetime.ApplicationStopped.Register(s => ((TaskCompletionSource)s!).SetResult(), tcs);
-            await tcs.Task.ConfigureAwait(false);
-        }
-
+        _hostApplicationLifetime?.StopApplication();
         await _exitTcs.Task.ConfigureAwait(false);
 
         if (appTask.GetAwaiter().GetResult() is IAsyncDisposable asyncDisposable)
@@ -315,21 +343,19 @@ public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDis
         var hostDescriptor = applicationBuilder.Services.Single(s => s.ServiceType == typeof(IHost) && s.ServiceKey is null);
         applicationBuilder.Services.Remove(hostDescriptor);
 
-        // Insert the registration, modified to be a keyed service keyed on this factory instance.
-        var interceptedDescriptor = hostDescriptor switch
+        Func<IServiceProvider, IHost> innerHostFactory = hostDescriptor switch
         {
-            { ImplementationFactory: { } factory } => ServiceDescriptor.KeyedSingleton<IHost>(this, (sp, _) => (IHost)factory(sp)),
-            { ImplementationInstance: { } instance } => ServiceDescriptor.KeyedSingleton<IHost>(this, (IHost)instance),
-            { ImplementationType: { } type } => ServiceDescriptor.KeyedSingleton(typeof(IHost), this, type),
+            { ImplementationFactory: { } factory } => sp => (IHost)factory(sp),
+            { ImplementationInstance: { } instance } => _ => (IHost)instance,
+            { ImplementationType: { } type } => sp => (IHost)ActivatorUtilities.CreateInstance(sp, type),
             _ => throw new InvalidOperationException($"Registered service descriptor for {typeof(IHost)} does not conform to any known pattern.")
         };
-        applicationBuilder.Services.Add(interceptedDescriptor);
 
-        // Add a non-keyed registration which resolved the keyed registration, enabling interception.
-        applicationBuilder.Services.AddSingleton<IHost>(sp => new ObservedHost(sp.GetRequiredKeyedService<IHost>(this), this));
+        // Register the replacement, which will construct the original host during resolution, enabling interception.
+        applicationBuilder.Services.AddSingleton<IHost>(sp => new ObservedHost(innerHostFactory(sp), this));
     }
 
-    private sealed class ObservedHost(IHost innerHost, DistributedApplicationFactory<TEntryPoint> appFactory) : IHost, IAsyncDisposable
+    private sealed class ObservedHost(IHost innerHost, DistributedApplicationFactory appFactory) : IHost, IAsyncDisposable
     {
         private bool _disposing;
 
@@ -378,6 +404,9 @@ public class DistributedApplicationFactory<TEntryPoint> : IDisposable, IAsyncDis
             }
         }
 
-        public Task StopAsync(CancellationToken cancellationToken = default) => innerHost.StopAsync(cancellationToken);
+        public async Task StopAsync(CancellationToken cancellationToken = default)
+        {
+            await innerHost.StopAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 }

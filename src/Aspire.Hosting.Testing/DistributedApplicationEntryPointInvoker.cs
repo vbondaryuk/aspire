@@ -4,6 +4,11 @@ using Microsoft.Extensions.Hosting;
 
 namespace Aspire.Hosting.Testing;
 
+internal interface IEntryPointInvoker
+{
+    Task<DistributedApplication> StartAsync(string[] args, CancellationToken cancellationToken);
+}
+
 internal sealed class DistributedApplicationEntryPointInvoker
 {
     // This helpers encapsulates all of the complex logic required to:
@@ -12,61 +17,85 @@ internal sealed class DistributedApplicationEntryPointInvoker
     // 3. Give the caller a chance to execute logic to mutate the IDistributedApplicationBuilder
     // 4. Resolve the instance of the DistributedApplication
     // 5. Allow the caller to determine if the entry point has completed
-    public static Func<string[], CancellationToken, Task<DistributedApplication>>? ResolveEntryPoint(
-        Assembly assembly,
+    public static IEntryPointInvoker? ResolveEntryPoint(
+        Assembly? assembly,
         Action<DistributedApplicationOptions, HostApplicationBuilderSettings>? onConstructing = null,
         Action<DistributedApplicationBuilder>? onConstructed = null,
         Action<DistributedApplicationBuilder>? onBuilding = null,
         Action<Exception?>? entryPointCompleted = null)
     {
-        if (assembly.EntryPoint is null)
+        if (assembly?.EntryPoint is null)
         {
             return null;
         }
 
-        return async (args, ct) =>
-        {
-            var invoker = new EntryPointInvoker(
-                args,
+        return new EntryPointInvoker(
                 assembly.EntryPoint,
                 onConstructing,
                 onConstructed,
                 onBuilding,
                 entryPointCompleted);
-            return await invoker.InvokeAsync(ct).ConfigureAwait(false);
-        };
     }
 
-    private sealed class EntryPointInvoker : IObserver<DiagnosticListener>
+    private sealed class EntryPointInvoker : IEntryPointInvoker, IObserver<DiagnosticListener>
     {
         private static readonly AsyncLocal<EntryPointInvoker> s_currentListener = new();
-        private readonly string[] _args;
-        private readonly MethodInfo _entryPoint;
-        private readonly TaskCompletionSource<DistributedApplication> _appTcs = new();
+        private readonly Func<string[], object?> _entryPoint;
+        private readonly TaskCompletionSource<DistributedApplication> _appTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _entryPointTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ApplicationBuilderDiagnosticListener _applicationBuilderListener;
         private readonly Action<DistributedApplicationOptions, HostApplicationBuilderSettings>? _onConstructing;
         private readonly Action<DistributedApplicationBuilder>? _onConstructed;
         private readonly Action<DistributedApplicationBuilder>? _onBuilding;
         private readonly Action<Exception?>? _entryPointCompleted;
+        private readonly string _invokerThreadName = "DistributedApplicationFactory.EntryPoint";
 
         public EntryPointInvoker(
-            string[] args,
             MethodInfo entryPoint,
             Action<DistributedApplicationOptions, HostApplicationBuilderSettings>? onConstructing,
             Action<DistributedApplicationBuilder>? onConstructed,
             Action<DistributedApplicationBuilder>? onBuilding,
-            Action<Exception?>? entryPointCompleted)
+            Action<Exception?>? entryPointCompleted) : this(
+                GetEntryPointInvoker(entryPoint),
+                onConstructing,
+                onConstructed,
+                onBuilding,
+                entryPointCompleted,
+                $"{entryPoint.DeclaringType?.Assembly.GetName().Name ?? "Unknown"}.EntryPoint")
         {
-            _args = args;
+        }
+
+        public EntryPointInvoker(
+            Func<string[], object?> entryPoint,
+            Action<DistributedApplicationOptions, HostApplicationBuilderSettings>? onConstructing,
+            Action<DistributedApplicationBuilder>? onConstructed,
+            Action<DistributedApplicationBuilder>? onBuilding,
+            Action<Exception?>? entryPointCompleted,
+            string invokerThreadName)
+        {
             _entryPoint = entryPoint;
             _onConstructing = onConstructing;
             _onConstructed = onConstructed;
             _onBuilding = onBuilding;
             _entryPointCompleted = entryPointCompleted;
+            _invokerThreadName = invokerThreadName;
             _applicationBuilderListener = new(this);
         }
 
-        public async Task<DistributedApplication> InvokeAsync(CancellationToken cancellationToken)
+        private static Func<string[], object?> GetEntryPointInvoker(MethodInfo entryPoint)
+        {
+            var parameters = entryPoint.GetParameters();
+            if (parameters.Length == 0)
+            {
+                return args => entryPoint.Invoke(null, []);
+            }
+            else
+            {
+                return args => entryPoint.Invoke(null, [args]);
+            }
+        }
+
+        public async Task<DistributedApplication> StartAsync(string[] args, CancellationToken cancellationToken)
         {
             using var subscription = DiagnosticListener.AllListeners.Subscribe(this);
 
@@ -82,16 +111,8 @@ internal sealed class DistributedApplicationEntryPointInvoker
                     // aren't scoped to this execution of the entry point.
                     s_currentListener.Value = this;
 
-                    var parameters = _entryPoint.GetParameters();
-                    object? result;
-                    if (parameters.Length == 0)
-                    {
-                        result = _entryPoint.Invoke(null, []);
-                    }
-                    else
-                    {
-                        result = _entryPoint.Invoke(null, [_args]);
-                    }
+                    // Invoke the entry point.
+                    _ = _entryPoint(args);
 
                     // Try to set an exception if the entry point returns gracefully, this will force
                     // build to throw
@@ -113,14 +134,31 @@ internal sealed class DistributedApplicationEntryPointInvoker
                 }
                 finally
                 {
+                    if (exception is AggregateException ae)
+                    {
+                        if (ae.InnerExceptions.Count == 1)
+                        {
+                            exception = ae.InnerExceptions[0];
+                        }
+                    }
+
                     // Signal that the entry point is completed
+                    if (exception is not null)
+                    {
+                        _entryPointTcs.SetException(exception);
+                    }
+                    else
+                    {
+                        _entryPointTcs.SetResult();
+                    }
+
                     _entryPointCompleted?.Invoke(exception);
                 }
             })
             {
                 // Make sure this doesn't hang the process
                 IsBackground = true,
-                Name = $"{_entryPoint.DeclaringType?.Assembly.GetName().Name ?? "Unknown"}.EntryPoint"
+                Name = _invokerThreadName
             };
 
             // Start the thread

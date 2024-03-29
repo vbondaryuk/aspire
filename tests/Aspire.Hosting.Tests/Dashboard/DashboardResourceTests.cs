@@ -15,7 +15,7 @@ public class DashboardResourceTests
     [Fact]
     public async Task DashboardIsAutomaticallyAddedAsHiddenResource()
     {
-        using var builder = TestDistributedApplicationBuilder.Create();
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = false);
 
         var dashboardPath = Path.GetFullPath("dashboard");
 
@@ -24,7 +24,7 @@ public class DashboardResourceTests
             o.DashboardPath = dashboardPath;
         });
 
-        var app = builder.Build();
+        using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(default);
 
@@ -42,11 +42,11 @@ public class DashboardResourceTests
     [Fact]
     public async Task DashboardIsAddedFirst()
     {
-        using var builder = TestDistributedApplicationBuilder.Create();
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = false);
 
         builder.AddContainer("my-container", "my-image");
 
-        var app = builder.Build();
+        using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(default);
 
@@ -61,7 +61,7 @@ public class DashboardResourceTests
     [Fact]
     public async Task DashboardDoesNotAddResource_ConfiguresExistingDashboard()
     {
-        using var builder = TestDistributedApplicationBuilder.Create();
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = false);
 
         builder.Services.AddSingleton<IDashboardEndpointProvider, MockDashboardEndpointProvider>();
 
@@ -75,7 +75,7 @@ public class DashboardResourceTests
 
         var container = builder.AddContainer(KnownResourceNames.AspireDashboard, "my-image");
 
-        var app = builder.Build();
+        using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(default);
 
@@ -129,7 +129,7 @@ public class DashboardResourceTests
     [Fact]
     public async Task DashboardWithDllPathLaunchesDotnet()
     {
-        using var builder = TestDistributedApplicationBuilder.Create();
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = false);
 
         var dashboardPath = Path.GetFullPath("dashboard.dll");
 
@@ -158,7 +158,7 @@ public class DashboardResourceTests
     public async Task DashboardAuthConfigured_EnvVarsPresent()
     {
         // Arrange
-        using var builder = TestDistributedApplicationBuilder.Create();
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = false);
 
         builder.Services.AddSingleton<IDashboardEndpointProvider, MockDashboardEndpointProvider>();
 
@@ -172,7 +172,7 @@ public class DashboardResourceTests
             ["AppHost:OtlpApiKey"] = "TestOtlpApiKey!"
         });
 
-        var app = builder.Build();
+        using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(default);
 
@@ -193,7 +193,7 @@ public class DashboardResourceTests
     public async Task DashboardAuthRemoved_EnvVarsUnsecured()
     {
         // Arrange
-        using var builder = TestDistributedApplicationBuilder.Create();
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = false);
 
         builder.Services.AddSingleton<IDashboardEndpointProvider, MockDashboardEndpointProvider>();
 
@@ -205,7 +205,7 @@ public class DashboardResourceTests
             ["DOTNET_DASHBOARD_OTLP_ENDPOINT_URL"] = "http://localhost"
         });
 
-        var app = builder.Build();
+        using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(default);
 
@@ -223,7 +223,7 @@ public class DashboardResourceTests
     public async Task DashboardResourceServiceUriIsSet()
     {
         // Arrange
-        using var builder = TestDistributedApplicationBuilder.Create();
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = false);
 
         builder.Services.AddSingleton<IDashboardEndpointProvider, MockDashboardEndpointProvider>();
 
@@ -235,7 +235,7 @@ public class DashboardResourceTests
             ["DOTNET_DASHBOARD_OTLP_ENDPOINT_URL"] = "http://localhost"
         });
 
-        var app = builder.Build();
+        using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(default);
 
@@ -251,9 +251,13 @@ public class DashboardResourceTests
     [Fact]
     public async Task DashboardIsNotAddedInPublishMode()
     {
-        using var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        using var builder = TestDistributedApplicationBuilder.Create(options =>
+        {
+            options.DisableDashboard = false;
+            options.Args = ["--publisher", "manifest"];
+        });
 
-        var app = builder.Build();
+        using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(default);
 
@@ -265,7 +269,7 @@ public class DashboardResourceTests
     [Fact]
     public async Task DashboardIsNotAddedIfDisabled()
     {
-        using var builder = TestDistributedApplicationBuilder.Create(new DistributedApplicationOptions { DisableDashboard = true });
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.DisableDashboard = true);
 
         var app = builder.Build();
 
@@ -280,11 +284,11 @@ public class DashboardResourceTests
     public void ContainerIsValidWithDashboardIsDisabled()
     {
         // Set the host environment to "Development" so that the container validates services.
-        using var builder = TestDistributedApplicationBuilder.Create(new DistributedApplicationOptions
+        using var builder = TestDistributedApplicationBuilder.Create(options =>
         {
-            DisableDashboard = true,
-            Args = ["--environment", "Development"] }
-        );
+            options.DisableDashboard = true;
+            options.Args = ["--environment", "Development"];
+        });
 
         // Container validation logic runs when the service provider is built.
         using var app = builder.Build();

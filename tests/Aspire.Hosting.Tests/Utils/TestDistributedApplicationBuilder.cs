@@ -1,8 +1,9 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Diagnostics;
 using Aspire.Hosting.Dashboard;
-using Aspire.Hosting.Dcp;
+using Aspire.Hosting.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -15,19 +16,9 @@ namespace Aspire.Hosting.Utils;
 /// This class wraps the builder and provides a way to automatically dispose it to prevent test failures from excessive
 /// FileSystemWatcher instances from many tests.
 /// </summary>
-public sealed class TestDistributedApplicationBuilder : IDisposable, IDistributedApplicationBuilder
+public static class TestDistributedApplicationBuilder
 {
-    private readonly IDistributedApplicationBuilder _innerBuilder;
-    private bool _builtApp;
-
-    public ConfigurationManager Configuration => _innerBuilder.Configuration;
-    public string AppHostDirectory => _innerBuilder.AppHostDirectory;
-    public IHostEnvironment Environment => _innerBuilder.Environment;
-    public IServiceCollection Services => _innerBuilder.Services;
-    public DistributedApplicationExecutionContext ExecutionContext => _innerBuilder.ExecutionContext;
-    public IResourceCollection Resources => _innerBuilder.Resources;
-
-    public static TestDistributedApplicationBuilder Create(DistributedApplicationOperation operation = DistributedApplicationOperation.Run)
+    public static IDistributedApplicationTestingBuilder Create(DistributedApplicationOperation operation)
     {
         var args = operation switch
         {
@@ -36,67 +27,219 @@ public sealed class TestDistributedApplicationBuilder : IDisposable, IDistribute
             _ => throw new ArgumentOutOfRangeException(nameof(operation))
         };
 
-        return Create(new DistributedApplicationOptions { Args = args });
+        return Create(args);
     }
 
-    public static TestDistributedApplicationBuilder Create(DistributedApplicationOptions options)
+    /// <summary>
+    /// Creates a new instance of <see cref="DistributedApplicationTestingBuilder"/>.
+    /// </summary>
+    /// <returns>
+    /// A new instance of <see cref="DistributedApplicationTestingBuilder"/>.
+    /// </returns>
+    public static IDistributedApplicationTestingBuilder Create(params string[] args)
     {
-        // Fake dashboard and CLI paths to avoid throwing on build
-        var builder = DistributedApplication.CreateBuilder(options);
+        return new TestingBuilder((o, a) => o.Args = args);
+    }
 
-        builder.Services.Configure<DcpOptions>(o =>
+    /// <summary>
+    /// Creates a new instance of <see cref="DistributedApplicationTestingBuilder"/>.
+    /// </summary>
+    /// <returns>
+    /// A new instance of <see cref="DistributedApplicationTestingBuilder"/>.
+    /// </returns>
+    public static IDistributedApplicationTestingBuilder Create(Action<DistributedApplicationOptions> configureOptions)
+    {
+        return new TestingBuilder((o, a) => configureOptions(o));
+    }
+
+    private sealed class TestingBuilder : IDistributedApplicationTestingBuilder
+    {
+        private readonly DistributedApplicationBuilder _innerBuilder;
+        private bool _didBuild;
+        private bool _disposedValue;
+
+        public TestingBuilder(Action<DistributedApplicationOptions, HostApplicationBuilderSettings>? configureOptions)
         {
-            // Make sure we have a dashboard path and CLI path (but don't overwrite them if they're already set)
-            o.DashboardPath ??= "dashboard";
-            o.CliPath ??= "dcp";
-        });
+            var appAssembly = typeof(TestDistributedApplicationBuilder).Assembly;
+            var assemblyName = appAssembly.FullName;
 
-        builder.Services.Configure<DashboardOptions>(o =>
-        {
-            // Make sure we have a dashboard URL and OTLP endpoint URL (but don't overwrite them if they're already set)
-            o.DashboardUrl ??= "http://localhost:8080";
-            o.OtlpEndpointUrl ??= "http://localhost:4317";
-        });
+            _innerBuilder = BuilderInterceptor.CreateBuilder(Configure);
 
-        return new(builder);
-    }
+            _innerBuilder.Services.Configure<DashboardOptions>(o =>
+            {
+                // Make sure we have a dashboard URL and OTLP endpoint URL (but don't overwrite them if they're already set)
+                o.DashboardUrl ??= "http://localhost:8080";
+                o.OtlpEndpointUrl ??= "http://localhost:4317";
+            });
 
-    private TestDistributedApplicationBuilder(IDistributedApplicationBuilder builder)
-    {
-        _innerBuilder = builder;
-    }
+            _innerBuilder.Services.AddHttpClient();
+            _innerBuilder.Services.ConfigureHttpClientDefaults(http => http.AddStandardResilienceHandler());
 
-    public IResourceBuilder<T> AddResource<T>(T resource) where T : IResource
-    {
-        return _innerBuilder.AddResource(resource);
-    }
+            void Configure(DistributedApplicationOptions applicationOptions, HostApplicationBuilderSettings hostBuilderOptions)
+            {
+                hostBuilderOptions.EnvironmentName = Environments.Development;
+                hostBuilderOptions.ApplicationName = appAssembly.GetName().Name;
+                applicationOptions.AssemblyName = assemblyName;
+                applicationOptions.DisableDashboard = true;
+                var cfg = hostBuilderOptions.Configuration ??= new();
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["DcpPublisher:RandomizePorts"] = "true",
+                    ["DcpPublisher:DeleteResourcesOnShutdown"] = "true",
+                    ["DcpPublisher:ResourceNameSuffix"] = $"{Random.Shared.Next():x}",
+                });
 
-    public IResourceBuilder<T> CreateResourceBuilder<T>(T resource) where T : IResource
-    {
-        return _innerBuilder.CreateResourceBuilder(resource);
-    }
+                // If there is no assembly specified, apply default values for DCP and the dashboard.
+                if (string.IsNullOrWhiteSpace(assemblyName))
+                {
+                    cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["DcpPublisher:DcpCliPath"] = "dcp",
+                        ["DcpPublisher:aspiredashboardpath"] = "dashboard",
+                    });
+                }
 
-    public DistributedApplication Build()
-    {
-        _builtApp = true;
-        return _innerBuilder.Build();
-    }
+                configureOptions?.Invoke(applicationOptions, hostBuilderOptions);
+            }
+        }
 
-    public void Dispose()
-    {
-        // When the builder is disposed we build a host and then dispose it.
-        // This cleans up unmanaged resources on the inner builder.
-        if (!_builtApp)
+        public ConfigurationManager Configuration => _innerBuilder.Configuration;
+
+        public string AppHostDirectory => _innerBuilder.AppHostDirectory;
+
+        public IHostEnvironment Environment => _innerBuilder.Environment;
+
+        public IServiceCollection Services => _innerBuilder.Services;
+
+        public DistributedApplicationExecutionContext ExecutionContext => _innerBuilder.ExecutionContext;
+
+        public IResourceCollection Resources => _innerBuilder.Resources;
+
+        public IResourceBuilder<T> AddResource<T>(T resource) where T : IResource => _innerBuilder.AddResource(resource);
+
+        public DistributedApplication Build()
         {
             try
             {
-                _innerBuilder.Build().Dispose();
+                return _innerBuilder.Build();
             }
-            catch
+            finally
             {
-                // Ignore errors.
+                _didBuild = true;
+            }
+        }
+
+        public Task<DistributedApplication> BuildAsync(CancellationToken cancellationToken = default) => Task.FromResult(Build());
+
+        public IResourceBuilder<T> CreateResourceBuilder<T>(T resource) where T : IResource
+        {
+            return _innerBuilder.CreateResourceBuilder(resource);
+        }
+
+        public void Dispose()
+        {
+            if (!_disposedValue)
+            {
+                _disposedValue = true;
+                if (!_didBuild)
+                {
+                    try
+                    {
+                        using var app = Build();
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+
+        private sealed class BuilderInterceptor : IObserver<DiagnosticListener>
+        {
+            private static readonly ThreadLocal<BuilderInterceptor?> s_currentListener = new();
+            private readonly ApplicationBuilderDiagnosticListener _applicationBuilderListener;
+            private readonly Action<DistributedApplicationOptions, HostApplicationBuilderSettings>? _onConstructing;
+
+            private BuilderInterceptor(Action<DistributedApplicationOptions, HostApplicationBuilderSettings>? onConstructing)
+            {
+                _onConstructing = onConstructing;
+                _applicationBuilderListener = new(this);
+            }
+
+            public static DistributedApplicationBuilder CreateBuilder(Action<DistributedApplicationOptions, HostApplicationBuilderSettings> onConstructing)
+            {
+                var interceptor = new BuilderInterceptor(onConstructing);
+                var original = s_currentListener.Value;
+                s_currentListener.Value = interceptor;
+                try
+                {
+                    using var subscription = DiagnosticListener.AllListeners.Subscribe(interceptor);
+                    return new DistributedApplicationBuilder([]);
+                }
+                finally
+                {
+                    s_currentListener.Value = original;
+                }
+            }
+
+            public void OnCompleted()
+            {
+            }
+
+            public void OnError(Exception error)
+            {
+
+            }
+
+            public void OnNext(DiagnosticListener value)
+            {
+                if (s_currentListener.Value != this)
+                {
+                    // Ignore events that aren't for this listener
+                    return;
+                }
+
+                if (value.Name == "Aspire.Hosting")
+                {
+                    _applicationBuilderListener.Subscribe(value);
+                }
+            }
+
+            private sealed class ApplicationBuilderDiagnosticListener(BuilderInterceptor owner) : IObserver<KeyValuePair<string, object?>>
+            {
+                private IDisposable? _disposable;
+
+                public void Subscribe(DiagnosticListener listener)
+                {
+                    _disposable = listener.Subscribe(this);
+                }
+
+                public void OnCompleted()
+                {
+                    _disposable?.Dispose();
+                }
+
+                public void OnError(Exception error)
+                {
+                }
+
+                public void OnNext(KeyValuePair<string, object?> value)
+                {
+                    if (s_currentListener.Value != owner)
+                    {
+                        // Ignore events that aren't for this listener
+                        return;
+                    }
+
+                    if (value.Key == "DistributedApplicationBuilderConstructing")
+                    {
+                        var args = ((DistributedApplicationOptions Options, HostApplicationBuilderSettings InnerBuilderOptions))value.Value!;
+                        owner._onConstructing?.Invoke(args.Options, args.InnerBuilderOptions);
+                    }
+                }
             }
         }
     }
+
 }
 
