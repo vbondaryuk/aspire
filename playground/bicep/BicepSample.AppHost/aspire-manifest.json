@@ -134,7 +134,10 @@
     "aiwithoutlaw": {
       "type": "azure.bicep.v0",
       "connectionString": "{aiwithoutlaw.outputs.appInsightsConnectionString}",
-      "path": "aiwithoutlaw.module.bicep"
+      "path": "aiwithoutlaw.module.bicep",
+      "params": {
+        "logAnalyticsWorkspaceId": "{containerAppEnv.outputs.logAnalyticsWorkspaceId}"
+      }
     },
     "redis": {
       "type": "azure.bicep.v0",

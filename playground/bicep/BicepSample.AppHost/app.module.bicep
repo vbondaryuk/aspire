@@ -2,6 +2,7 @@ param location string
 param tags object = {}
 param parameters object = {}
 param inputs object = {}
+
 module test 'test.bicep' = {
     name: 'test'
     params: {
@@ -94,6 +95,7 @@ module aiwithoutlaw 'aiwithoutlaw.module.bicep' = {
     name: 'aiwithoutlaw'
     params: {
         location: location
+        logAnalyticsWorkspaceId: containerAppEnv.outputs.logAnalyticsWorkspaceId
     }
 }
 

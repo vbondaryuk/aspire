@@ -213,6 +213,7 @@ internal class AzureContainerAppsInfastructure(DistributedApplicationExecutionCo
         sb.AppendLine("param tags object = {}");
         sb.AppendLine("param parameters object = {}"); // external parameters
         sb.AppendLine("param inputs object = {}"); // external parameters
+        sb.AppendLine();
 
         var keyVaults = new HashSet<string>();
 
