@@ -102,11 +102,9 @@
       "connectionString": "{postgres2.secretOutputs.connectionString}",
       "path": "postgres2.module.bicep",
       "params": {
-        "principalId": "{default-identity.outputs.principalId}",
         "keyVaultName": "",
         "administratorLogin": "{administratorLogin.value}",
-        "administratorLoginPassword": "{administratorLoginPassword.value}",
-        "principalType": "ServicePrincipal"
+        "administratorLoginPassword": "{administratorLoginPassword.value}"
       }
     },
     "db2": {
@@ -136,19 +134,14 @@
     "aiwithoutlaw": {
       "type": "azure.bicep.v0",
       "connectionString": "{aiwithoutlaw.outputs.appInsightsConnectionString}",
-      "path": "aiwithoutlaw.module.bicep",
-      "params": {
-        "logAnalyticsWorkspaceId": ""
-      }
+      "path": "aiwithoutlaw.module.bicep"
     },
     "redis": {
       "type": "azure.bicep.v0",
       "connectionString": "{redis.secretOutputs.connectionString}",
       "path": "redis.module.bicep",
       "params": {
-        "principalId": "{default-identity.outputs.principalId}",
-        "keyVaultName": "",
-        "principalType": "ServicePrincipal"
+        "keyVaultName": ""
       }
     },
     "sb": {
@@ -175,6 +168,7 @@
       "env": {
         "OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EXCEPTION_LOG_ATTRIBUTES": "true",
         "OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EVENT_LOG_ATTRIBUTES": "true",
+        "OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY": "in_memory",
         "ASPNETCORE_FORWARDEDHEADERS_ENABLED": "true",
         "ConnectionStrings__db": "{db.connectionString}",
         "ConnectionStrings__db2": "{db2.connectionString}",
@@ -209,19 +203,19 @@
     },
     "containerAppEnv": {
       "type": "azure.bicep.v0",
-      "path": "containerappenv.bicep"
+      "path": "containerappenv.module.bicep"
     },
     "containerRegistry": {
       "type": "azure.bicep.v0",
-      "path": "containerregistry.bicep"
+      "path": "containerregistry.module.bicep"
     },
     "default-identity": {
       "type": "azure.bicep.v0",
-      "path": "default-identity.bicep"
+      "path": "default-identity.module.bicep"
     },
     "api-containerApp": {
       "type": "azure.bicep.v0",
-      "path": "api-containerapp.bicep",
+      "path": "api-containerapp.module.bicep",
       "params": {
         "sql_outputs_sqlServerFqdn": "{sql.outputs.sqlServerFqdn}",
         "postgres2_secretOutputs_connectionString": "{postgres2.secretOutputs.connectionString}",
@@ -248,7 +242,7 @@
     },
     "app": {
       "type": "azure.bicep.v0",
-      "path": "app.bicep"
+      "path": "app.module.bicep"
     }
   }
 }

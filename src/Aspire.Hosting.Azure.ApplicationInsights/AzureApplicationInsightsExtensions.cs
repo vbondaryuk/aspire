@@ -82,7 +82,6 @@ public static class AzureApplicationInsightsExtensions
             {
                 // If the user does not supply a log analytics workspace of their own we still create a parameter on the Aspire
                 // side and the CDK side so that AZD can fill the value in with the one it generates.
-                construct.Resource.Parameters.Add(AzureBicepResource.KnownParameters.LogAnalyticsWorkspaceId, "");
                 appInsights.AssignProperty(p => p.WorkspaceResourceId, new Parameter(AzureBicepResource.KnownParameters.LogAnalyticsWorkspaceId));
 
             }
